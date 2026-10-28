@@ -122,22 +122,47 @@ async function listen_for_notifications(
   notification_stream.cancel();
 }
 
+function makeLoggingTransport(transport: RpcTransport): RpcTransport {
+  const logTransform = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      const hex = Array.from(chunk)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join(" ");
+      console.log("[ZMK RX]", hex);
+      controller.enqueue(chunk);
+    },
+  });
+  return {
+    ...transport,
+    readable: transport.readable.pipeThrough(logTransform),
+  };
+}
+
 async function connect(
   transport: RpcTransport,
   setConn: Dispatch<ConnectionState>,
   setConnectedDeviceName: Dispatch<string | undefined>,
   signal: AbortSignal
 ) {
-  let conn = await create_rpc_connection(transport, { signal });
+  const loggingTransport = makeLoggingTransport(transport);
+  let conn = await create_rpc_connection(loggingTransport, { signal });
 
+  console.log("[ZMK] Sending getDeviceInfo...");
+  const CONNECT_TIMEOUT_MS = 5000;
   let details = await Promise.race([
     call_rpc(conn, { core: { getDeviceInfo: true } })
-      .then((r) => r?.core?.getDeviceInfo)
+      .then((r) => {
+        console.log("[ZMK] getDeviceInfo response:", r);
+        return r?.core?.getDeviceInfo;
+      })
       .catch((e) => {
-        console.error("Failed first RPC call", e);
+        console.error("[ZMK] Failed first RPC call:", e);
         return undefined;
       }),
-    valueAfter(undefined, 1000),
+    valueAfter(undefined, CONNECT_TIMEOUT_MS).then(() => {
+      console.error(`[ZMK] getDeviceInfo timed out after ${CONNECT_TIMEOUT_MS}ms`);
+      return undefined;
+    }),
   ]);
 
   if (!details) {
